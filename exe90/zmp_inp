@@ -1,0 +1,52 @@
+ &GEOMCONF  LGEOM    = 3,
+            LDIMEN   = 2 /
+ &PHYSCONF  LRAD     = 0,
+            NSPEC    = 0,
+            XHYDRO   = .true.,
+            XFORCE   = .true.,
+            XMHD     = .false.,
+            XTOTNRG  = .false.,
+            XGRAV    = .false.,
+            XGRVFFT  = .false.,
+            XPTMASS  = .false.,
+            XDMPOTL  = .true.,
+            XBRAG    = .false.,
+            XISO_COND = .false.,
+            XCOSMIC  = .false.,
+            XISO     = .false.,
+            XSUBAV   = .true.,
+            XVGRID   = .false. /
+ &IOCONF    XASCII   = .true.,
+            XHDF     = .false.,
+            XBIN     = .true.,
+            XRESTART = .true.,
+            XTSL     = .false. /
+ &PRECONF   SMALL_NO = 1.0D-99,
+            LARGE_NO = 1.0D+99 /
+ &ARRAYCONF IZONES   = 128,
+            JZONES   = 64,
+            KZONES   = 1,
+            MAXIJK   = 128/
+ &mpitop ntiles(1)=1,ntiles(2)=1,ntiles(3)=1,periodic=2*.false.,.true. /
+ &rescon irestart=0, resfile='resaa000000.000'/
+ &pcon nlim=100000000, tlim=1.5707963267949e+17, mbatch=1 /
+ &hycon qcon=4.0,qlin=0.2,courno=0.2, dfloor=1.e-29,efloor=1.0e-14,eceil=1.e-6, dtrat=1.d-5 /
+ &iib niis(1)= 2 /
+ &oib nois(1)= -1 /
+ &ijb nijs(1)= -1 /
+ &ojb nojs(1)= -1 /
+ &ikb niks(1)= 4 /
+ &okb noks(1)= 4 /
+ &ggen1 nbl=128,x1min=3.086e+21,x1max=6.172e+23,igrid=1,x1rat=1.04226174272939,lgrid=.true.  /
+ &ggen2 nbl=64,x2min=0.0,x2max=3.14159265358979,igrid=1,x2rat=1.,lgrid=.true.  /
+ &ggen3 nbl=1,x3min=0.0,x3max=6.28318530717959,igrid=1,x3rat=1.,lgrid=.true.  /
+ &grvcon ptmass=0.0, guniv=6.672e-8, tgrav=0.0, x1ptm=0.0, x2ptm=0.0, x3ptm=0.0  /
+ &radcon  /
+ &eqos  gamma=1.666666666666,gamma_cr=1.333333333333,mmw=1.0D0,ciso=0.0/
+ &pgen amp=0.3, x=0.7, y=0.28, z=0.02, ne_out=0.0015, prefac=1., K0=10.0, K100=110., 
+       alpha=1.4, mnot_msun=3.8e14, rs_kpc=390., r100=100., rmax=200., cond_prefac=1.0,
+       r_jet_kpc=2.0d0, th_jet= 0.52359877559d0, v_jet=3.d9, sig_r_kpc=0.05d0, sig_th=0.05d0,
+       jet_eff=6.d-3, mag_flag=1, ncond_lim=100 /
+ &gcon /
+ &iocon dtusr=1.5707963267949e+14, dthist=3.0e12, dthdf=1500.7d20,
+        dtbin=1.5707963267949e+14, dtdump=1.5707963267949e+16 /

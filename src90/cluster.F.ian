@@ -1,0 +1,207 @@
+c=======================================================================
+c
+c    \\\\\\\\\\      B E G I N   S U B R O U T I N E      //////////
+c    //////////                 CLUSTER                   \\\\\\\\\\
+c
+c=======================================================================
+c
+      subroutine cluster
+c
+c initialize an MHD cluster in hydrodynamic equilibrium
+c
+c-----------------------------------------------------------------------
+c
+      use real_prec
+      use config
+      use param
+      use field
+      use grid
+      use cons
+      use metallicity
+      use gravmod
+      use root
+      use domain
+#ifdef MPI_USED
+      use mpiyes
+#else
+      use mpino
+#endif
+      use mpipar
+c
+      implicit none
+c
+      integer  :: i, j, k
+      real(rl) :: a3(in+1,jn+1)
+      real(rl) :: rad, pres, gpot, den, pnot, rmin
+      real(rl) :: x, y, z, prefac
+      real(rl) :: r_conc, r_soft, gm_dm0
+      namelist  /pgen/ x, y, z, prefac
+c
+c-----------------------------------------------------------------------
+c
+c defining the properties of the central compact object; its located at origin
+c
+c all quantities are in real cgs units, not in some other normalized form
+c refer to Guo & Peng-Oh for the cluster parameters
+c
+       guniv = 6.673d-8
+       x = 0.7
+       y = 0.28
+       z = 0.02
+       prefac = 1.0d17
+
+       v1=0.0d0; v2=0.0d0; v3=0.0d0
+c
+c density, pressure, phi_dm are read from a file
+c
+       rad=0.0d0
+       i = is-2
+c
+#ifdef MPI_USED
+       do j = 0, nprocs-1
+        if (myid.eq.j) then
+#endif
+        open(unit=15)
+        do while (rad<=x1b(ie+3))
+c          read(15,*) rad, den, pres, gpot
+          read(15,*) rad, pres, den
+          rad = rad*3.086d21
+          if (rad>=x1b(i) .and. i<=ie+3) then
+            d(i,:,:) = den
+            p(i,:,:) = pres
+            write(*,*) i
+c            phi_dm(i) = gpot
+            i=i+1
+          endif
+        enddo
+        close(15)
+#ifdef MPI_USED
+        endif
+       enddo
+#endif
+c trying a hotter start
+       e = 1.0*p/gamm1
+
+c concentration scale, rc=rvir/conc, in kpc
+       r_conc = 3.9d2*3.086d21 
+c softening scale
+       r_soft = 20.0d0*3.086d21
+       gm_dm0 = -4.0*pi*guniv*6.810483d-26*r_conc**3
+
+       do i = is-2, ie+3
+         phi_dm(i) = gm_dm0*(  r_soft/(r_conc-r_soft)**2
+     &   *(log((1.0+x1b(i)/r_soft)/(1.0+x1b(i)/r_conc)) 
+     &   + log(1.0+x1b(i)/r_soft)/(x1b(i)/r_soft)  )
+     &   + r_conc*(r_conc-2.*r_soft)/(r_soft*(r_conc-r_soft)**2)
+     &   *log(1.0+x1b(i)/r_conc)/(x1b(i)/r_soft)   )
+       enddo
+
+c
+c
+c set up a high-beta initial field; prefac is chosen in this way
+c
+c
+       pnot = p(is,(js+je)/2,(ks+ke)/2)
+       rmin = x1a(is)
+
+       if (myid .eq. 0) then
+         read (1, pgen)
+         write (2, pgen)
+#ifdef MPI_USED
+         buf_in(1) = x
+         buf_in(2) = y
+         buf_in(3) = z
+         buf_in(4) = prefac
+         buf_in(5) = p(is,(js+je)/2,(ks+ke)/2)
+         buf_in(6) = x1a(is)
+#endif
+       endif
+#ifdef MPI_USED
+        call MPI_BCAST( buf_in, 6, MPI_FLOAT
+     &                , 0, comm3d, ierr )
+        if (myid .ne. 0) then
+          x = buf_in(1)
+          y = buf_in(2)
+          z = buf_in(3)
+          prefac = buf_in(4)
+c
+c pressure at r=rin
+c
+          pnot = buf_in(5)
+          rmin = buf_in(6)
+        endif
+#endif
+
+       mu = 1.0d0/(2.0*x+0.75*y+0.5625*z)
+       mue = 2.0d0/(1.0d0+x)
+
+      if (xmhd) then
+       do j = 1, jn+1
+       do i = 1, in+1
+         a3(i,j) = prefac*x1a(i)*sin(x2a(j))/(6.0d23) !roughly rout=200 kpc
+       enddo
+       enddo
+
+       do k = 1, kn
+       do j = 1, jn
+       do i = 1, in
+c         b1(i,j,k) = (g32a(j+1)*a3(i,j+1)-g32a(j)*a3(i,j))/(x2a(j+1)-
+c     &    x2a(j))/g31a(i)/g32b(j)
+c         b2(i,j,k) = -(g2a(i+1)*a3(i+1,j)-g2a(i)*a3(i,j))/(x1a(i+1)-
+c     &    x1a(i))/g2b(i)
+c         b3(i,j,k) = 0.0
+         if (x2b(j).gt.0.5*pi) then 
+           b1(i,j,k) = prefac*1.d-12*x1ai(i)*x1ai(i)*(6.d23*6.d23)
+         else
+           b1(i,j,k) = -prefac*1.d-12*x1ai(i)*x1ai(i)*(6.d23*6.d23)
+         endif
+       enddo
+       enddo
+       enddo
+      endif
+c
+c start with very small cosmic ray pressure
+c    
+      if (xcosmic) then
+        do i=1, in
+c does not look steep enough
+          pcr(i,:,:) = 0.005*pnot*(x1b(i)/rmin)**(-3.0)
+c          pcr(i,:,:) = p(i,:,:)*0.2
+          ecr(i,:,:) = pcr(i,:,:)/(gamma_cr-1.0)
+          p(i,:,:) = p(i,:,:) - pcr(i,:,:)
+          e(i,:,:) = p(i,:,:)/(gamma-1.0)
+        enddo
+      endif
+c
+c specifying abundance data in the innermost areas
+c
+      if (nspec.gt.1) then
+      abun = 1.0d-15 
+#ifdef MPI_USED
+      if (coords(1).eq.0) then 
+#endif
+      do k=ks-2, ke+3
+      do j=js-2, je+3
+        abun(is-2:is,j,k,1) = 1.0d15
+        abun(is-2:is+4,j,k,2) = 1.0d15
+      enddo 
+      enddo
+#ifdef MPI_USED
+      endif 
+#endif
+      endif 
+c
+c
+c
+      j = (1+jn)/2
+      k = (1+kn)/2
+      do i = 1, in
+        write(10*(1+myid),1234) x1b(i), d(i,j,k), e(i,j,k), v1(i,j,k)
+     &, b1(i,j,k), b2(i,j,k), phi_dm(i)
+      enddo
+1234  format(7e20.7)
+
+c      stop
+c
+      return
+      end

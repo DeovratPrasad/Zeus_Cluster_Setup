@@ -1,0 +1,252 @@
+c=======================================================================
+c    \\\\\\\\\\      B E G I N   S U B R O U T I N E      //////////
+c    //////////                  COOLING                  \\\\\\\\\\
+c
+c                            Developed by
+c                            Prateek Sharma 
+c
+c=======================================================================
+c
+       subroutine cooling 
+c
+c Implements f-f (+metals) cooling; assuming that CGS units are used
+c Density cannot simply be scaled out like in case when there is no cooling
+c or self gravity. Tozzi & Norman 2001 cooling function; see Chandran 2007, 
+c Guo & Peng Oh 2007
+c
+c......................................................................
+      use real_prec
+      use config
+      use param
+      use root
+      use grid
+      use field
+      use d_e_out
+      use brag, only : rad_cool, feed_heat
+#ifdef MPI_USED
+      use mpiyes
+#else
+      use mpino
+#endif
+      use mpipar
+      use metallicity 
+      use cons
+      use bndry
+c
+      implicit NONE
+c
+      integer  :: i, j, k, n, nsubcycle
+      real(rl) :: mui, n_e, n_i, TkeV, dvol
+      real(rl) :: cooling_rate(in,jn,kn), heating_rate(in)
+      real(rl) :: darea, dtcool
+      real(rl) :: mdot_cold, eff, rkpc_cut
+c
+c      rkpc_cut = 100./10.**.3333333
+      rkpc_cut = 100.
+      eff = 3.d-3
+      mui = 1.0d0/(1.0d0/mu - 1.0d0/mue)
+c
+c calculate mdot in cold phase through the inner boundary
+c
+#ifdef MPI_USED
+      if (coords(1).eq.0) then
+#endif
+        mdot_cold = 0.0
+        i = is
+        do k = ks, ke
+        do j = js, je
+          n_e = d(i,j,k)/(mp*mue)
+          n_i = d(i,j,k)/(mp*mui)
+          TkeV = gamm1*e(i,j,k)/((n_e+n_i)*1.6022d-9) 
+          darea = g2a(i)*g31a(i)*dvl2a(j)*dvl3a(k)
+c
+c the following is not quite accurate as density and v1 are located at different places, 
+c but should be fine for our purposes; v1 is negative
+c
+c          if (TkeV.lt.0.01) 
+           mdot_cold = mdot_cold - darea*d(i,j,k)*v1(i,j,k)
+        enddo
+        enddo
+#ifdef MPI_USED
+      endif
+      buf_in(1) = mdot_cold
+      call MPI_ALLREDUCE( buf_in(1), buf_out(1), 1
+     &                      , MPI_FLOAT
+     &                      , MPI_SUM, comm3d, ierr)
+      mdot_cold  =   buf_out(1) 
+#endif
+c
+c      write(*,*) 'mdot_cold = ', mdot_cold 
+      do i = is, ie
+c        heating_rate(i) = 0.25*eff*mdot_cold*clight*clight
+c     &  /sqrt(40.*3.086e21*x1b(i)**5.)
+c        heating_rate(i) = 0.25*eff*(mdot_cold/(40.0*3.086d21)**3)
+c     &  *clight*clight
+c     &  /(x1b(i)/3.086d21/40.)**.5/(1.0+ (x1b(i)/(40.0*3.086d21))**3)
+c     &  /(4.*pi)
+
+c        heating_rate(i) = eff*(mdot_cold/(40.0*3.086d21)**3)
+c     &  *clight*clight
+c     &  /(1.0+ (x1b(i)/(40.0*3.086d21))**3.5)
+c     &  /(4.*pi)
+
+        heating_rate(i) = eff*(mdot_cold/(rkpc_cut*3.086d21)**3)
+     &  *clight*clight/(x1b(i)/(rkpc_cut*3.086d21))**1.5
+     &  /(1.0+ (x1b(i)/(rkpc_cut*3.086d21))**3.5)
+     &  /(4.*pi)
+
+c        write(*,*) heating_rate(i), eff, mdot_cold, clight         
+
+c        write(11,*) x1b(i), heating_rate(i), mdot_cold
+      enddo
+c
+      dtcool = huge
+
+      do k=ks, ke
+      do j=js, je
+      do i=is, ie
+        n_e = d(i,j,k)/(mp*mue)
+        n_i = d(i,j,k)/(mp*mui)
+        TkeV = gamm1*e(i,j,k)/((n_e+n_i)*1.6022d-9)
+c
+        if (TkeV.gt.0.02) then
+          cooling_rate(i,j,k) = 1.0d-22*n_i*n_e*( 8.6d-3*TkeV**(-1.7)
+     &    + 5.8d-2*TkeV**0.5 + 6.3d-2)
+        else if (TkeV.le.0.02.and.TkeV.ge.0.0017235) then
+          cooling_rate(i,j,k) = n_i*n_e*6.72e-22*(TkeV/0.02)**0.6 
+        else 
+          cooling_rate(i,j,k) = n_i*n_e*1.544e-22*(TkeV/0.0017235)**6.0
+        endif 
+c
+c      if (TkeV.gt.0.17235) then
+c          cooling_rate(i,j,k) = 1.0d-22*n_i*n_e*( 8.6d-3*TkeV**(-1.7)
+c     &    + 5.8d-2*TkeV**0.5 + 6.3d-2)
+c      else
+c          cooling_rate(i,j,k) = n_i*n_e*2.579e-23*(TkeV/0.17235)**6.0
+c      endif
+c
+        if (TkeV.le.1.0d-4) cooling_rate(i,j,k) = 0.0d0
+c
+        dtcool = min( dtcool
+     &  , e(i,j,k)/abs(cooling_rate(i,j,k)-heating_rate(i)) )
+c
+
+c        write(11,*) i, j, cooling_rate(i,j,k), heating_rate(i)
+
+      enddo
+      enddo
+      enddo
+c
+#ifdef MPI_USED
+      buf_in(1) = dtcool
+      call MPI_ALLREDUCE( buf_in(1), buf_out(1), 1
+     &                      , MPI_2DOUBLE_PRECISION
+     &                      , MPI_MINLOC, comm3d, ierr)
+      dtcool  =   buf_out(1) 
+#endif
+c
+c factor of 4.0 chosen arbitrarily
+c
+      nsubcycle = int(4.0*dt/dtcool) + 1
+c      nsubcycle = int(10.0*dt/dtcool) + 1
+
+c      nsubcycle = 1
+c
+c discovered that some sims. done implicitly were having numerical issues. Try playing with it.
+c 
+c take 10 times longer timesteps
+c
+c      nsubcycle = int(0.1*dt/dtcool) + 1 
+
+      dtcool = dt/nsubcycle
+c
+      if (myid.eq.0.and.mod(nhy,500).eq.0) 
+     & write(17,*) nsubcycle
+c      write(17,*) nsubcycle, dt, dtcool, mdot_cold
+c
+      rad_cool=0.0
+      feed_heat=0.0
+
+      do n = 1, nsubcycle
+c
+      do i = is, ie 
+      do k = ks, ke
+      do j = js, je
+
+        n_e = d(i,j,k)/(mp*mue)
+        n_i = d(i,j,k)/(mp*mui)
+        TkeV = gamm1*e(i,j,k)/((n_e+n_i)*1.6022d-9)
+c
+        if (TkeV.gt.0.02) then
+          cooling_rate(i,j,k) = 1.0d-22*n_i*n_e*( 8.6d-3*TkeV**(-1.7)
+     &    + 5.8d-2*TkeV**0.5 + 6.3d-2)
+        else if (TkeV.le.0.02.and.TkeV.ge.0.0017235) then
+          cooling_rate(i,j,k) = n_i*n_e*6.72e-22*(TkeV/0.02)**0.6
+        else
+          cooling_rate(i,j,k) = n_i*n_e*1.544e-22*(TkeV/0.0017235)**6.0
+        endif
+
+c        if (TkeV.gt.0.17235) then 
+c          cooling_rate(i,j,k) = 1.0d-22*n_i*n_e*( 8.6d-3*TkeV**(-1.7)
+c     &    + 5.8d-2*TkeV**0.5 + 6.3d-2)
+c        else
+c          cooling_rate(i,j,k) = n_i*n_e*2.579e-23*(TkeV/0.17235)**6.0
+c        endif
+c
+        if (TkeV.le.1.0d-4) cooling_rate(i,j,k) = 0.0d0
+
+        dvol = dvl1a(i)*dvl2a(j)*dvl3a(k)
+        rad_cool(i) = rad_cool(i) + dvol*cooling_rate(i,j,k)
+        feed_heat(i) = feed_heat(i) + dvol*heating_rate(i)
+c
+c combine heating rate w cooling rate
+c
+
+        cooling_rate(i,j,k) = cooling_rate(i,j,k) - heating_rate(i) 
+c
+      enddo
+      enddo
+      enddo
+
+
+      do k = ks, ke
+      do j = js, je
+      do i = is, ie
+c
+        if (cooling_rate(i,j,k).lt.0.0) then
+
+        e(i,j,k) = e(i,j,k) - dtcool*cooling_rate(i,j,k)
+c
+c cooling done implicitly
+c
+        else
+
+        e(i,j,k) = e(i,j,k)/( 1.0+dtcool*cooling_rate(i,j,k)/e(i,j,k) )
+
+        endif
+
+      enddo 
+      enddo
+      enddo
+c
+#ifdef MPI_USED
+      if (coords(1).eq.ntiles(1)-1) then
+#endif
+        e(ie,:,:) = e_outer
+#ifdef MPI_USED
+      endif
+#endif
+
+      enddo!subcycle
+
+      rad_cool=rad_cool/float(nsubcycle)
+      feed_heat=feed_heat/float(nsubcycle)
+c
+c making the boundary values out of date
+c
+      do i = 1,6
+       bvstat(i,2) = 0      !  e
+      enddo
+c
+      return
+      end

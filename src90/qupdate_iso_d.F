@@ -1,0 +1,367 @@
+c=======================================================================
+c
+c    \\\\\\\\\\      B E G I N   S U B R O U T I N E      //////////
+c    //////////                   QUPDATE_D               \\\\\\\\\\
+c
+c                            Developed by Prateek Sharma
+c
+c
+c driver for anisotropic thermal conduction. we use a dummy variable (w3dm)
+c to store old value of e and calculate heat fluxes based on that. another
+c dummy variable (w3dn) carries the updated internal energy. IMP: we assume 
+c that each grid point is updated just once in one subcycle step.
+c
+c
+c=======================================================================
+c
+       subroutine qupdate_iso_d
+c
+c......................................................................
+      use real_prec
+      use param
+      use cons
+      use root
+      use grid
+      use field
+      use scratch
+      use d_e_out
+#ifdef MPI_USED
+      use mpiyes
+#else
+      use mpino
+#endif
+      use mpipar
+      use brag, only : kappa_iso, q_cond_iso, q_cond, q_cond_tot
+      use config
+      use bndry
+      use metallicity
+c
+      implicit NONE
+c
+      integer  :: i, j, k, l
+      integer  :: nsubcycle
+      real(rl) :: dtcond, dr2min, dtnsub
+      integer  :: k1, k2 
+      real(rl) :: Coulog, n_e, n_i, mui, plasma_temp
+      real(rl) :: buf_send(in), buf_recv(in)
+
+      Coulog=37.0d0
+    
+c
+c----------------------------------------------------------------------
+c thermal conduction is subcycled;
+c
+c calculation is divided as in pdv_d, the standard way to overlap 
+c communication and computation
+c
+c----------------------------------------------------------------------
+c
+      mui = 1.0d0/(1.0d0/mu-1.0d0/mue)
+
+      do k=ks, ke
+      do j=js, je  
+      do i=is, ie
+c
+        n_e = d(i,j,k)/(mp*mue) 
+        n_i = d(i,j,k)/(mp*mui)
+        plasma_temp = gamm1*e(i,j,k)/((n_e+n_i)*boltz)
+c
+c kappa_iso is diffusivity [cm^2s^{-1}], not conductivity
+c work in cgs units with proper conversions; be very careful about factores of 
+c gamma, n, etc. and be consistent in def. of kappa and chi
+c
+c use 1/3 spitzer for now
+c
+        kappa_iso(i,j,k) = cond_prefac*gamm1*1.84d-5*plasma_temp**2.5
+     &  /(Coulog*(n_e+n_i)*boltz)
+
+c        kappa_iso(i,j,k) = 3.e26
+
+      enddo
+      enddo
+      enddo 
+
+      bvstat(:,9)=0
+
+      dtcond = huge
+      do k = ks, ke
+      do j = js, je
+      do i = is, ie
+        dr2min = min(dx1a(i),g2b(i)*dx2a(j),g31b(i)*g32b(j)*dx3a(k))
+        dr2min = dr2min*dr2min
+c
+c Courant stability in 3-D: dt<dx^2/6D
+c
+c        dtcond = min(dtcond, 0.166666*dr2min/kappa_iso(i,j,k))
+c        dtcond = min(dtcond, 0.125*dr2min/kappa_iso(i,j,k))
+
+        dtnsub = dr2min/kappa_iso(i,j,k)
+
+        if (ldimen.eq.1) then 
+          dtnsub = max(dt/ncond_lim, 0.45*dr2min/kappa_iso(i,j,k))
+          kappa_iso(i,j,k) = 0.45*dr2min/dtnsub
+          dtcond = min(dtnsub, dtcond)
+        endif
+        if (ldimen.eq.2) then 
+          dtnsub = max(dt/ncond_lim, 0.24*dr2min/kappa_iso(i,j,k))
+          kappa_iso(i,j,k) = 0.24*dr2min/dtnsub
+          dtcond = min(dtnsub, dtcond)
+        endif 
+        if (ldimen.eq.3) then 
+          dtnsub = max(dt/ncond_lim, 0.16*dr2min/kappa_iso(i,j,k))
+          kappa_iso(i,j,k) = 0.16*dr2min/dtnsub
+          dtcond = min(dtnsub, dtcond)
+        endif
+
+      enddo
+      enddo
+      enddo
+
+#ifdef MPI_USED
+      buf_in(1) = dtcond
+      call MPI_ALLREDUCE( buf_in(1), buf_out(1), 1
+     &                      , MPI_FLOAT
+     &                      , MPI_MIN, comm3d, ierr)
+      dtcond  =   buf_out(1)
+#endif
+
+      nsubcycle = int(dt/dtcond) + 1
+
+      if (myid.eq.0.and.mod(nhy,500).eq.0) write(18,*) nsubcycle
+
+      dtcond = dt/float(nsubcycle)
+
+      q_cond_iso = 0.0
+
+      do l = 1, nsubcycle
+c
+c assigning previous internal energy density to the dummy variable w3dm
+c
+        do k=ks-1,ke+1
+        do j=js-1,je+1
+        do i=is-1,ie+1
+          w3dm(i,j,k) = e(i,j,k)
+        enddo
+        enddo
+        enddo
+c
+c-----------------------------------------------------------------------
+        if(ldimen .eq. 2) go to 222
+        if(ldimen .eq. 1) go to 111
+c-----------------------------------------------------------------------
+c
+c Divide the computational volume into three equal pieces.  We must
+c have at least 5 active zones in the 3-direction.
+c
+         k1 = int( real( ke - ks + 1 ) / 3.0 ) + ks
+         k2 = int( real( ke - ks + 1 ) / 3.0 ) + k1
+c
+c i boundaries
+c
+c    1) Post sends and receives.
+c
+         nreq = 0
+         nsub = nsub + 1
+         call bvale (1,1,0,0,0,0,w3dm)
+         call bvald (1,1,0,0,0,0,d)
+         call bvalecr (1,1,0,0,0,0,kappa_iso)
+c
+c    2) Do first portion of the interior points.
+c
+         call qupdate_iso (is+1,ie-1,js+1,je-1,ks+1,k1,w3dm,w3dn,dtcond)
+c
+c
+c    3) Wait for communications to complete.
+c
+#ifdef MPI_USED
+         if(nreq .ne. 0)
+     .      call MPI_WAITALL ( nreq, req, stat, ierr )
+#endif      
+c......................................................................
+c
+c j boundaries
+c
+c    1) Post sends and receives.
+c
+         nreq = 0
+         nsub = nsub + 1
+         call bvale (0,0,1,1,0,0,w3dm)
+         call bvald (0,0,1,1,0,0,d)
+         call bvalecr (0,0,1,1,0,0,kappa_iso)
+c
+c    2) Do middle 1/3 of the interior points, and some on borders.
+c
+         call qupdate_iso (is,is,js+1,je-1,ks+1,k1,w3dm,w3dn,dtcond)
+         call qupdate_iso (ie,ie,js+1,je-1,ks+1,k1,w3dm,w3dn,dtcond)
+         call qupdate_iso (is,ie,js+1,je-1,k1+1,k2,w3dm,w3dn,dtcond)
+c
+c    3) Wait for communications to complete.
+c
+#ifdef MPI_USED
+         if(nreq .ne. 0)
+     .      call MPI_WAITALL ( nreq, req, stat, ierr )
+#endif
+c......................................................................
+c
+c k boundaries
+c
+c    1) Post sends and receives.
+c
+         nreq = 0
+         nsub = nsub + 1
+         call bvale (0,0,0,0,1,1,w3dm)
+         call bvald (0,0,0,0,1,1,d) 
+         call bvalecr (0,0,0,0,1,1,kappa_iso)
+c
+c    2) Do last 1/3 of the interior points, and some on borders.
+c
+         call qupdate_iso (is,ie,js,js,ks+1,k2,w3dm,w3dn,dtcond)
+         call qupdate_iso (is,ie,je,je,ks+1,k2,w3dm,w3dn,dtcond)
+         call qupdate_iso (is,ie,js,je,k2+1,ke-1,w3dm,w3dn,dtcond)
+c
+c    3) Wait for communications to complete.
+c
+#ifdef MPI_USED
+         if(nreq .ne. 0)
+     .      call MPI_WAITALL ( nreq, req, stat, ierr )
+#endif
+c......................................................................
+c
+c Finally, do the remaining border.
+c
+         call qupdate_iso (is,ie,js,je,ks,ks,w3dm,w3dn,dtcond) 
+         call qupdate_iso (is,ie,js,je,ke,ke,w3dm,w3dn,dtcond)
+c
+        go to 999
+c======================================================================
+c     2D TRANSPORT
+c======================================================================
+c
+222   continue
+c
+c i boundaries
+c
+c    1) Post sends and receives.
+c
+         nreq = 0
+         nsub = nsub + 1
+         call bvale (1,1,0,0,0,0,w3dm)
+         call bvald (1,1,0,0,0,0,d)
+         call bvalecr (1,1,0,0,0,0,kappa_iso)
+c
+c    2) Do first portion of the interior points.
+c
+         call qupdate_iso (is+1,ie-1,js+1,je-1,ks,ks,w3dm,w3dn,dtcond)
+c
+c    3) Wait for communications to complete.
+c
+#ifdef MPI_USED
+         if(nreq .ne. 0)
+     .      call MPI_WAITALL ( nreq, req, stat, ierr )
+#endif
+c......................................................................
+c
+c j boundaries
+c
+c    1) Post sends and receives.
+c
+         nreq = 0
+         nsub = nsub + 1
+         call bvale (0,0,1,1,0,0,w3dm)
+         call bvald (0,0,1,1,0,0,d)
+         call bvalecr (0,0,1,1,0,0,kappa_iso)
+c
+         call qupdate_iso (is,is,js+1,je-1,ks,ks,w3dm,w3dn,dtcond)
+         call qupdate_iso (ie,ie,js+1,je-1,ks,ks,w3dm,w3dn,dtcond)
+c
+c    3) Wait for communications to complete.
+c
+#ifdef MPI_USED
+       if(nreq .ne. 0)
+     .    call MPI_WAITALL ( nreq, req, stat, ierr )
+#endif
+c
+c Finally, do the remaining border.
+c
+         call qupdate_iso (is,ie,js,js,ks,ks,w3dm,w3dn,dtcond)
+         call qupdate_iso (is,ie,je,je,ks,ks,w3dm,w3dn,dtcond)
+c
+      go to 999
+c======================================================================
+c     1D TRANSPORT
+c======================================================================
+c
+111   continue
+c
+c i boundaries
+c
+c    1) Post sends and receives.
+c
+         nreq = 0
+         nsub = nsub + 1
+         call bvale (1,1,0,0,0,0,w3dm)
+         call bvald (1,1,0,0,0,0,d)
+         call bvalecr (1,1,0,0,0,0,kappa_iso)
+c
+c    2) Do first portion of the interior points.
+c
+         call qupdate_iso (is+1,ie-1,js,js,ks,ks,w3dm,w3dn,dtcond)
+c
+c    3) Wait for communications to complete.
+c
+#ifdef MPI_USED
+         if(nreq .ne. 0)
+     .      call MPI_WAITALL ( nreq, req, stat, ierr )
+#endif
+c......................................................................
+c
+c Finally, do the remaining border.
+c
+         call qupdate_iso (is,is,js,js,ks,ks,w3dm,w3dn,dtcond)
+         call qupdate_iso (ie,ie,js,js,ks,ks,w3dm,w3dn,dtcond)
+c
+c      Mark the boundary values out of date.
+c
+999    continue
+       do i = 1,6
+         bvstat(i,2) = 0      !  e
+! recall that density is not changed by anisotropic conduction, therefore
+! no need to update it
+         bvstat(i,1) = 1
+       enddo
+c
+c update the internal energy
+c
+       do k=ks,ke
+       do j=js,je
+       do i=is,ie
+           e(i,j,k) = w3dn(i,j,k)
+       enddo
+       enddo
+       enddo
+c
+#ifdef MPI_USED
+      if (coords(1).eq.ntiles(1)-1) then
+#endif
+        e(ie,:,:) = e_outer
+#ifdef MPI_USED
+      endif
+#endif
+c
+      enddo !subcycle
+c
+      q_cond_iso = q_cond_iso/float(nsubcycle)
+c
+      q_cond_tot = q_cond + q_cond_iso
+c
+#ifdef MPI_USED
+      buf_send(1:ie-is+1) = q_cond_tot(is:ie)
+c
+      call MPI_ALLREDUCE( buf_send(1), buf_recv(1), (ie-is+1)
+     &, MPI_DOUBLE_PRECISION, MPI_SUM, comm2d, ierr)
+c
+      q_cond_tot(is:ie) = buf_recv(1:ie-is+1)
+#endif
+c
+      return
+      end
